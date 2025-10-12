@@ -5,7 +5,6 @@ const helmet = require('helmet');
 const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const morgan = require('morgan');
-const cartRoutes = require('./routes/cart');
 
 require('dotenv').config();
 
@@ -15,6 +14,15 @@ const orderRoutes = require('./routes/orders');
 const adminRoutes = require('./routes/admin');
 const paymentRoutes = require('./routes/payments');
 const inventoryRoutes = require('./routes/inventory');
+
+// Try to require cart routes, but don't fail if it doesn't exist
+let cartRoutes;
+try {
+  cartRoutes = require('./routes/cart');
+} catch (err) {
+  console.warn('⚠️  Cart routes not found - cart functionality will be disabled');
+  cartRoutes = null;
+}
 
 const app = express();
 
@@ -54,7 +62,11 @@ app.use('/api/orders', orderRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/inventory', inventoryRoutes);
-app.use('/api/cart', cartRoutes);
+
+// Only mount cart routes if they exist
+if (cartRoutes) {
+  app.use('/api/cart', cartRoutes);
+}
 
 // Static files
 app.use('/uploads', express.static('uploads'));
