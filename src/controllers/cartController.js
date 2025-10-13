@@ -5,11 +5,14 @@ const Product = require('../models/Product');
 // Get user's cart
 const getCart = async (req, res) => {
   try {
-    let cart = await Cart.findOne({ user: req.user.id }).populate('items.productId');
+    // Get userId from authenticated user object
+    const userId = req.user._id || req.user.id;
+    
+    let cart = await Cart.findOne({ userId }).populate('items.productId');
     
     if (!cart) {
       cart = await Cart.create({
-        user: req.user.id,
+        userId,
         items: [],
         totalAmount: 0,
         itemCount: 0
@@ -39,6 +42,7 @@ const getCart = async (req, res) => {
 const addToCart = async (req, res) => {
   try {
     const { productId, quantity = 1, price } = req.body;
+    const userId = req.user._id || req.user.id;
     
     // Validate required fields
     if (!productId) {
@@ -57,20 +61,21 @@ const addToCart = async (req, res) => {
       });
     }
 
-    // Check stock availability
-    if (product.availableStock < quantity) {
+    // Check stock availability - support both availableStock and stockQuantity
+    const availableStock = product.availableStock || product.stockQuantity || 0;
+    if (availableStock < quantity) {
       return res.status(400).json({
         success: false,
-        message: `Only ${product.availableStock} items available in stock`
+        message: `Only ${availableStock} items available in stock`
       });
     }
 
-    let cart = await Cart.findOne({ user: req.user.id });
+    let cart = await Cart.findOne({ userId });
     
     if (!cart) {
       // Create new cart if it doesn't exist
       cart = new Cart({
-        user: req.user.id,
+        userId,
         items: [{
           productId,
           quantity,
@@ -92,10 +97,10 @@ const addToCart = async (req, res) => {
         const newQuantity = cart.items[existingItemIndex].quantity + quantity;
         
         // Check stock for updated quantity
-        if (product.availableStock < newQuantity) {
+        if (availableStock < newQuantity) {
           return res.status(400).json({
             success: false,
-            message: `Only ${product.availableStock} items available in stock`
+            message: `Only ${availableStock} items available in stock`
           });
         }
         
@@ -127,6 +132,7 @@ const addToCart = async (req, res) => {
     res.json({
       success: true,
       data: {
+        itemCount: cart.itemCount,
         message: 'Item added to cart successfully',
         cart: {
           items: cart.items,
@@ -149,6 +155,7 @@ const updateCartItem = async (req, res) => {
   try {
     const { productId } = req.params;
     const { quantity } = req.body;
+    const userId = req.user._id || req.user.id;
 
     if (quantity < 0) {
       return res.status(400).json({
@@ -157,7 +164,7 @@ const updateCartItem = async (req, res) => {
       });
     }
 
-    const cart = await Cart.findOne({ user: req.user.id });
+    const cart = await Cart.findOne({ userId });
     if (!cart) {
       return res.status(404).json({
         success: false,
@@ -189,10 +196,11 @@ const updateCartItem = async (req, res) => {
         });
       }
 
-      if (product.availableStock < quantity) {
+      const availableStock = product.availableStock || product.stockQuantity || 0;
+      if (availableStock < quantity) {
         return res.status(400).json({
           success: false,
-          message: `Only ${product.availableStock} items available in stock`
+          message: `Only ${availableStock} items available in stock`
         });
       }
 
@@ -235,8 +243,9 @@ const updateCartItem = async (req, res) => {
 const removeFromCart = async (req, res) => {
   try {
     const { productId } = req.params;
+    const userId = req.user._id || req.user.id;
 
-    const cart = await Cart.findOne({ user: req.user.id });
+    const cart = await Cart.findOne({ userId });
     if (!cart) {
       return res.status(404).json({
         success: false,
@@ -293,7 +302,8 @@ const removeFromCart = async (req, res) => {
 // Clear entire cart
 const clearCart = async (req, res) => {
   try {
-    const cart = await Cart.findOne({ user: req.user.id });
+    const userId = req.user._id || req.user.id;
+    const cart = await Cart.findOne({ userId });
     
     if (!cart) {
       return res.status(404).json({
