@@ -18,6 +18,15 @@ const cartItemSchema = new mongoose.Schema({
     required: true,
     min: [0, 'Price cannot be negative']
   },
+  name: {
+    type: String,
+    required: true
+  },
+  image: {
+    type: String,
+    required: false,
+    default: ''
+  },
   addedAt: {
     type: Date,
     default: Date.now
@@ -56,7 +65,7 @@ cartSchema.pre('save', function(next) {
 });
 
 // Method to add item to cart
-cartSchema.methods.addItem = function(productId, quantity, price) {
+cartSchema.methods.addItem = function(productId, quantity, price, name, image) {
   const existingItem = this.items.find(item => 
     item.productId.toString() === productId.toString()
   );
@@ -64,11 +73,17 @@ cartSchema.methods.addItem = function(productId, quantity, price) {
   if (existingItem) {
     existingItem.quantity += quantity;
     existingItem.addedAt = new Date();
+    // Update price, name, and image in case product details changed
+    existingItem.price = price;
+    existingItem.name = name;
+    existingItem.image = image;
   } else {
     this.items.push({
       productId,
       quantity,
       price,
+      name,
+      image,
       addedAt: new Date()
     });
   }
@@ -108,5 +123,9 @@ cartSchema.methods.clearCart = function() {
   this.items = [];
   return this.save();
 };
+
+// Index for faster queries
+cartSchema.index({ userId: 1 });
+cartSchema.index({ 'items.productId': 1 });
 
 module.exports = mongoose.model('Cart', cartSchema);
