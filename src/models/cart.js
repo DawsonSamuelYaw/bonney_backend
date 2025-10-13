@@ -128,4 +128,4 @@ cartSchema.methods.clearCart = function() {
 cartSchema.index({ userId: 1 });
 cartSchema.index({ 'items.productId': 1 });
 
-module.exports = mongoose.model('Cart', cartSchema);
+module.exports = mongoose.model('cart', cartSchema);

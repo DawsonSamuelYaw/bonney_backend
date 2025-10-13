@@ -1,7 +1,7 @@
 // src/controllers/orderController.js - ENHANCED VERSION
 const Order = require('../models/Order');
 const User = require('../models/User');
-const Cart = require('../models/Cart');
+const Cart = require('../models/cart');
 const Product = require('../models/Product');
 const SerialPin = require('../models/SerialPin');
 const axios = require('axios'); // For Paystack API calls
