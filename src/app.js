@@ -1,4 +1,4 @@
-// src/app.js - Fixed Version with Better Path Resolution
+// src/app.js - Fixed Version with Working CORS
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -11,25 +11,27 @@ const fs = require('fs');
 require('dotenv').config();
 
 // Debug logging
+console.log('🌐 FRONTEND_URL:', process.env.FRONTEND_URL);
 console.log('📂 __dirname:', __dirname);
 console.log('📂 process.cwd():', process.cwd());
 
 const app = express();
 
-// Security middleware
-app.use(helmet());
-
-// CORS Configuration
+// SIMPLE CORS Configuration - No complex options
 app.use(cors({
   origin: [
+    'https://bigbonneyshop.netlify.app',
     'http://localhost:3000',
     'http://localhost:5173',
     'http://localhost:3001',
     process.env.FRONTEND_URL
   ].filter(Boolean),
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  credentials: true
+}));
+
+// Security middleware
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" }
 }));
 
 // Rate limiting
@@ -52,13 +54,20 @@ function requireRoute(routePath, routeName) {
     const possiblePaths = [
       path.join(__dirname, routePath),
       path.join(process.cwd(), 'src', routePath),
-      path.join(process.cwd(), routePath)
+      path.join(process.cwd(), routePath),
+      path.join(__dirname, '..', routePath)
     ];
 
     for (const tryPath of possiblePaths) {
-      if (fs.existsSync(tryPath + '.js') || fs.existsSync(tryPath)) {
-        console.log(`✅ ${routeName} routes loaded from:`, tryPath);
-        return require(tryPath);
+      const jsPath = tryPath + '.js';
+      const dirPath = tryPath;
+      
+      if (fs.existsSync(jsPath)) {
+        console.log(`✅ ${routeName} routes loaded from:`, jsPath);
+        return require(jsPath);
+      } else if (fs.existsSync(dirPath) && fs.existsSync(path.join(dirPath, 'index.js'))) {
+        console.log(`✅ ${routeName} routes loaded from:`, path.join(dirPath, 'index.js'));
+        return require(path.join(dirPath, 'index.js'));
       }
     }
 
@@ -68,6 +77,21 @@ function requireRoute(routePath, routeName) {
     return null;
   }
 }
+
+// Test route to verify CORS is working
+app.get('/api/test-cors', (req, res) => {
+  res.json({
+    success: true,
+    message: 'CORS is working!',
+    timestamp: new Date().toISOString(),
+    allowedOrigins: [
+      'https://bigbonneyshop.netlify.app',
+      'http://localhost:3000',
+      'http://localhost:5173',
+      process.env.FRONTEND_URL
+    ]
+  });
+});
 
 // Load routes with fallback
 const authRoutes = requireRoute('routes/auth', 'Auth') || requireRoute('./routes/auth', 'Auth');
@@ -89,6 +113,7 @@ if (inventoryRoutes) app.use('/api/inventory', inventoryRoutes);
 // Cart routes with fallback
 if (cartRoutes) {
   app.use('/api/cart', cartRoutes);
+  app.use('/api/user/cart', cartRoutes); // Add this duplicate route for frontend compatibility
   console.log('✅ Cart routes mounted successfully');
 } else {
   console.warn('⚠️  Using fallback cart routes');
@@ -142,6 +167,7 @@ if (cartRoutes) {
   });
 
   app.use('/api/cart', cartFallbackRouter);
+  app.use('/api/user/cart', cartFallbackRouter); // Add this duplicate route
 }
 
 // Static files
@@ -153,6 +179,8 @@ app.get('/health', (req, res) => {
     status: 'OK',
     timestamp: new Date().toISOString(),
     service: 'Big Bonney Backend',
+    environment: process.env.NODE_ENV,
+    frontendUrl: process.env.FRONTEND_URL,
     routes: {
       auth: !!authRoutes,
       products: !!productRoutes,
