@@ -1,6 +1,7 @@
 // src/routes/cart.js
 const express = require('express');
 const router = express.Router();
+const { protect } = require('../middleware/auth');
 const {
   addToCart,
   getCart,
@@ -9,25 +10,22 @@ const {
   clearCart
 } = require('../controllers/cartController');
 
-// Import your auth middleware - CORRECTED PATH
-const { authMiddleware } = require('../middleware/authMiddleware');
+// All cart routes require authentication
+router.use(protect);
 
-// Apply authentication to all cart routes
-router.use(authMiddleware);
-
-// GET /api/cart - Get user's cart
+// Get user's cart
 router.get('/', getCart);
 
-// POST /api/cart - Add item to cart
+// Add item to cart
 router.post('/', addToCart);
 
-// PUT /api/cart/:productId - Update item quantity in cart
+// Update cart item quantity
 router.put('/:productId', updateCartItem);
 
-// DELETE /api/cart/:productId - Remove item from cart
+// Remove item from cart
 router.delete('/:productId', removeFromCart);
 
-// DELETE /api/cart - Clear entire cart
+// Clear entire cart
 router.delete('/', clearCart);
 
 module.exports = router;
