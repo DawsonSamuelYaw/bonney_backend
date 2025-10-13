@@ -1,5 +1,5 @@
 // src/controllers/cartController.js
-const Cart = require('../models/Cart');
+const Cart = require('../models/cart');
 const Product = require('../models/Product');
 
 // Get user's cart
