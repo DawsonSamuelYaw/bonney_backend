@@ -1,44 +1,32 @@
-// src/app.js - Complete Fixed Version
+// src/app.js - Fixed Version with Better Path Resolution
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const morgan = require('morgan');
+const path = require('path');
+const fs = require('fs');
 
 require('dotenv').config();
 
-const authRoutes = require('./routes/auth');
-const productRoutes = require('./routes/products');
-const orderRoutes = require('./routes/orders');
-const adminRoutes = require('./routes/admin');
-const paymentRoutes = require('./routes/payments');
-const inventoryRoutes = require('./routes/inventory');
-
-// Try to require cart routes, but don't fail if it doesn't exist
-let cartRoutes;
-try {
-  cartRoutes = require('./routes/cart');
-  console.log('✅ Cart routes loaded successfully');
-} catch (err) {
-  console.error('❌ Cart routes error:', err.message);
-  console.warn('⚠️  Cart routes not found - using fallback routes');
-  cartRoutes = null;
-}
+// Debug logging
+console.log('📂 __dirname:', __dirname);
+console.log('📂 process.cwd():', process.cwd());
 
 const app = express();
 
 // Security middleware
 app.use(helmet());
 
-// CORS Configuration - FIXED
+// CORS Configuration
 app.use(cors({
   origin: [
-    'http://localhost:3000',   // Backend port
-    'http://localhost:5173',   // Vite frontend port
-    'http://localhost:3001',   // Alternative frontend port
-    process.env.FRONTEND_URL   // Production frontend URL
-  ].filter(Boolean), // Remove any undefined values
+    'http://localhost:3000',
+    'http://localhost:5173',
+    'http://localhost:3001',
+    process.env.FRONTEND_URL
+  ].filter(Boolean),
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -46,8 +34,8 @@ app.use(cors({
 
 // Rate limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100 // limit each IP to 100 requests per windowMs
+  windowMs: 15 * 60 * 1000,
+  max: 100
 });
 app.use('/api/', limiter);
 
@@ -57,40 +45,103 @@ app.use(express.urlencoded({ extended: true }));
 app.use(compression());
 app.use(morgan('combined'));
 
-// Routes
-app.use('/api/auth', authRoutes);
-app.use('/api/products', productRoutes);
-app.use('/api/orders', orderRoutes);
-app.use('/api/admin', adminRoutes);
-app.use('/api/payments', paymentRoutes);
-app.use('/api/inventory', inventoryRoutes);
+// Helper function to require routes safely
+function requireRoute(routePath, routeName) {
+  try {
+    // Try multiple possible paths
+    const possiblePaths = [
+      path.join(__dirname, routePath),
+      path.join(process.cwd(), 'src', routePath),
+      path.join(process.cwd(), routePath)
+    ];
 
-// Only mount cart routes if they exist
+    for (const tryPath of possiblePaths) {
+      if (fs.existsSync(tryPath + '.js') || fs.existsSync(tryPath)) {
+        console.log(`✅ ${routeName} routes loaded from:`, tryPath);
+        return require(tryPath);
+      }
+    }
+
+    throw new Error(`Route file not found in any of: ${possiblePaths.join(', ')}`);
+  } catch (err) {
+    console.error(`❌ ${routeName} routes error:`, err.message);
+    return null;
+  }
+}
+
+// Load routes with fallback
+const authRoutes = requireRoute('routes/auth', 'Auth') || requireRoute('./routes/auth', 'Auth');
+const productRoutes = requireRoute('routes/products', 'Product') || requireRoute('./routes/products', 'Product');
+const orderRoutes = requireRoute('routes/orders', 'Order') || requireRoute('./routes/orders', 'Order');
+const adminRoutes = requireRoute('routes/admin', 'Admin') || requireRoute('./routes/admin', 'Admin');
+const paymentRoutes = requireRoute('routes/payments', 'Payment') || requireRoute('./routes/payments', 'Payment');
+const inventoryRoutes = requireRoute('routes/inventory', 'Inventory') || requireRoute('./routes/inventory', 'Inventory');
+const cartRoutes = requireRoute('routes/cart', 'Cart') || requireRoute('./routes/cart', 'Cart');
+
+// Mount routes
+if (authRoutes) app.use('/api/auth', authRoutes);
+if (productRoutes) app.use('/api/products', productRoutes);
+if (orderRoutes) app.use('/api/orders', orderRoutes);
+if (adminRoutes) app.use('/api/admin', adminRoutes);
+if (paymentRoutes) app.use('/api/payments', paymentRoutes);
+if (inventoryRoutes) app.use('/api/inventory', inventoryRoutes);
+
+// Cart routes with fallback
 if (cartRoutes) {
   app.use('/api/cart', cartRoutes);
+  console.log('✅ Cart routes mounted successfully');
 } else {
+  console.warn('⚠️  Using fallback cart routes');
+  
   // Fallback cart routes
-  app.get('/api/cart', (req, res) => {
+  const cartFallbackRouter = express.Router();
+  
+  cartFallbackRouter.get('/', (req, res) => {
     res.status(200).json({
       success: true,
-      data: { cart: { itemCount: 0, items: [] } }
+      data: { 
+        cart: { 
+          items: [], 
+          totalAmount: 0, 
+          itemCount: 0 
+        } 
+      }
     });
   });
 
-  app.post('/api/cart', (req, res) => {
+  cartFallbackRouter.post('/', (req, res) => {
     res.status(200).json({
       success: true,
-      message: 'Item added to cart (demo)',
-      data: { itemCount: 1 }
+      message: 'Cart service temporarily unavailable',
+      data: { itemCount: 0 }
     });
   });
 
-  app.get('/api/cart/items', (req, res) => {
+  cartFallbackRouter.put('/:productId', (req, res) => {
     res.status(200).json({
       success: true,
-      data: { items: [] }
+      message: 'Cart service temporarily unavailable',
+      data: { cart: { items: [], totalAmount: 0, itemCount: 0 } }
     });
   });
+
+  cartFallbackRouter.delete('/:productId', (req, res) => {
+    res.status(200).json({
+      success: true,
+      message: 'Cart service temporarily unavailable',
+      data: { cart: { items: [], totalAmount: 0, itemCount: 0 } }
+    });
+  });
+
+  cartFallbackRouter.delete('/', (req, res) => {
+    res.status(200).json({
+      success: true,
+      message: 'Cart service temporarily unavailable',
+      data: { cart: { items: [], totalAmount: 0, itemCount: 0 } }
+    });
+  });
+
+  app.use('/api/cart', cartFallbackRouter);
 }
 
 // Static files
@@ -101,26 +152,35 @@ app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'OK',
     timestamp: new Date().toISOString(),
-    service: 'Big Bonney Backend'
+    service: 'Big Bonney Backend',
+    routes: {
+      auth: !!authRoutes,
+      products: !!productRoutes,
+      orders: !!orderRoutes,
+      admin: !!adminRoutes,
+      payments: !!paymentRoutes,
+      inventory: !!inventoryRoutes,
+      cart: !!cartRoutes
+    }
   });
 });
 
-// Error handling middleware (MUST be before 404 handler)
+// Error handling middleware
 app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({
+  console.error('❌ Error:', err.stack);
+  res.status(err.status || 500).json({
     success: false,
-    message: 'Something went wrong!',
+    message: err.message || 'Something went wrong!',
     ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
   });
 });
 
-// 404 handler - FIXED (using regex pattern instead of wildcard)
+// 404 handler
 app.use((req, res) => {
   if (req.path.startsWith('/api/')) {
     return res.status(404).json({
       success: false,
-      message: 'Route not found'
+      message: `Route not found: ${req.method} ${req.path}`
     });
   }
   res.status(404).json({
