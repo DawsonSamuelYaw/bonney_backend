@@ -1,4 +1,4 @@
-// src/app.js - CORS Configuration Fix
+// src/app.js - Fixed CORS and Route Configuration
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -15,37 +15,71 @@ const adminRoutes = require('./routes/admin');
 const paymentRoutes = require('./routes/payments');
 const inventoryRoutes = require('./routes/inventory');
 
-// Try to require cart routes, but don't fail if it doesn't exist
+// Import cart routes with better error handling
 let cartRoutes;
 try {
   cartRoutes = require('./routes/cart');
+  console.log('✅ Cart routes loaded successfully');
 } catch (err) {
-  console.warn('⚠️  Cart routes not found - cart functionality will be disabled');
-  cartRoutes = null;
+  console.warn('⚠️  Cart routes not found - creating fallback routes');
+  // Create simple fallback cart routes
+  const express = require('express');
+  cartRoutes = express.Router();
+  cartRoutes.use((req, res) => {
+    res.status(501).json({
+      success: false,
+      message: 'Cart functionality is currently being implemented'
+    });
+  });
 }
 
 const app = express();
+
+// Fix for express-rate-limit trust proxy issue
+app.set('trust proxy', 1);
 
 // Security middleware
 app.use(helmet());
 
 // CORS Configuration - FIXED
-app.use(cors({
-  origin: [
-    'http://localhost:3000',   // Backend port
-    'http://localhost:5173',   // Vite frontend port
-    'http://localhost:3001',   // Alternative frontend port
-    process.env.FRONTEND_URL   // Production frontend URL
-  ].filter(Boolean), // Remove any undefined values
+const corsOptions = {
+  origin: function (origin, callback) {
+    const allowedOrigins = [
+      'http://localhost:3000',
+      'http://localhost:5173', 
+      'http://localhost:3001',
+      'https://bonney-backend.onrender.com',
+      process.env.FRONTEND_URL
+    ].filter(Boolean);
+    
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      console.log('Blocked by CORS:', origin);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+};
 
-// Rate limiting
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions)); // Enable pre-flight for all routes
+
+// Rate limiting with trust proxy fix
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100 // limit each IP to 100 requests per windowMs
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: {
+    success: false,
+    message: 'Too many requests from this IP, please try again later.'
+  },
+  standardHeaders: true,
+  legacyHeaders: false
 });
 app.use('/api/', limiter);
 
@@ -63,38 +97,82 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/inventory', inventoryRoutes);
 
-// Only mount cart routes if they exist
-if (cartRoutes) {
-  app.use('/api/cart', cartRoutes);
-}
+// Mount cart routes (either real or fallback)
+app.use('/api/cart', cartRoutes);
+
+// Alternative cart endpoints for compatibility
+app.use('/api/user/cart', cartRoutes);
 
 // Static files
 app.use('/uploads', express.static('uploads'));
 
-// Health check
+// Health check with detailed info
 app.get('/health', (req, res) => {
   res.status(200).json({ 
     status: 'OK', 
     timestamp: new Date().toISOString(),
-    service: 'Big Bonney Backend'
+    service: 'Big Bonney Backend',
+    version: '1.0.0',
+    environment: process.env.NODE_ENV || 'development',
+    features: {
+      cart: !!cartRoutes
+    }
+  });
+});
+
+// API info endpoint
+app.get('/api', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Big Bonney API is running',
+    endpoints: {
+      auth: '/api/auth',
+      products: '/api/products', 
+      cart: '/api/cart',
+      orders: '/api/orders',
+      payments: '/api/payments',
+      inventory: '/api/inventory'
+    },
+    version: '1.0.0'
   });
 });
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  console.error(err.stack);
+  console.error('Error stack:', err.stack);
+  
+  // CORS errors
+  if (err.message === 'Not allowed by CORS') {
+    return res.status(403).json({
+      success: false,
+      message: 'CORS policy: Origin not allowed'
+    });
+  }
+  
+  // Rate limit errors
+  if (err.status === 429) {
+    return res.status(429).json({
+      success: false,
+      message: 'Too many requests, please try again later.'
+    });
+  }
+  
+  // Default error
   res.status(500).json({
     success: false,
-    message: 'Something went wrong!',
-    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
+    message: 'Internal server error',
+    ...(process.env.NODE_ENV === 'development' && { 
+      error: err.message,
+      stack: err.stack 
+    })
   });
 });
 
-// 404 handler
-app.use((req, res, next) => {
+// 404 handler - should be last
+app.use('*', (req, res) => {
   res.status(404).json({
     success: false,
-    message: 'Route not found'
+    message: `Route ${req.originalUrl} not found`
   });
 });
 
