@@ -1,4 +1,4 @@
-// src/models/SerialPin.js - UPDATED VERSION
+// src/models/SerialPin.js - Make sure it looks like this
 const mongoose = require('mongoose');
 
 const serialPinSchema = new mongoose.Schema({
@@ -26,7 +26,7 @@ const serialPinSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
-  status: {  // ADDED - needed for order processing
+  status: {
     type: String,
     enum: ['available', 'reserved', 'sold'],
     default: 'available'
@@ -38,22 +38,13 @@ const serialPinSchema = new mongoose.Schema({
     type: Date
   }
 }, {
-  timestamps: true,
-  toJSON: { virtuals: true },
-  toObject: { virtuals: true }
+  timestamps: true
 });
 
-// Indexes for better performance
+// Indexes
 serialPinSchema.index({ productId: 1, isUsed: 1, orderId: 1 });
-serialPinSchema.index({ productId: 1, status: 1 });  // ADDED - for status queries
+serialPinSchema.index({ productId: 1, status: 1 });
 serialPinSchema.index({ serialNumber: 1 });
 serialPinSchema.index({ orderId: 1 });
-
-// Transform output
-serialPinSchema.methods.toJSON = function() {
-  const serialObject = this.toObject();
-  delete serialObject.__v;
-  return serialObject;
-};
 
 module.exports = mongoose.model('SerialPin', serialPinSchema);

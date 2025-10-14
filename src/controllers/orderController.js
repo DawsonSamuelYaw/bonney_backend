@@ -1,10 +1,10 @@
-// src/controllers/orderController.js - ENHANCED VERSION
+// src/controllers/orderController.js - FIXED VERSION
 const Order = require('../models/Order');
 const User = require('../models/User');
 const Cart = require('../models/cart');
 const Product = require('../models/Product');
 const SerialPin = require('../models/SerialPin');
-const axios = require('axios'); // For Paystack API calls
+const axios = require('axios');
 
 class OrderController {
   // Get user orders
@@ -136,7 +136,7 @@ class OrderController {
             availableStock = await SerialPin.countDocuments({
               productId: product._id,
               isUsed: false,
-              orderId: null
+              status: 'available' // Only count truly available pins
             });
           } else {
             availableStock = product.stockQuantity || 0;
@@ -211,8 +211,6 @@ class OrderController {
           paymentResponse = await OrderController.initializePaystackPayment(order, user);
         } catch (payError) {
           console.error('Paystack initialization error:', payError);
-          // Don't fail the order creation, just log the error
-          // You might want to update order status or notify admin
         }
       }
 
@@ -238,7 +236,6 @@ class OrderController {
         }
       };
 
-      // Add payment data if available
       if (paymentResponse) {
         response.data.payment = paymentResponse;
       }
@@ -256,66 +253,61 @@ class OrderController {
   }
 
   // Initialize Paystack payment
-  // In your src/controllers/orderController.js
-// Update the initializePaystackPayment method:
-
-static async initializePaystackPayment(order, user) {
-  try {
-    const paystackSecretKey = process.env.PAYSTACK_SECRET_KEY;
-    
-    if (!paystackSecretKey) {
-      throw new Error('Paystack secret key not configured');
-    }
-
-    const paymentData = {
-      email: user.email,
-      amount: Math.round(order.totalAmount * 100), // Paystack uses kobo (cents)
-      reference: `${order.orderNumber}_${Date.now()}`,
-      // FIXED: Changed callback URL to checkout page instead of payment/callback
-      callback_url: `${process.env.FRONTEND_URL}/checkout`,  // Changed from /payment/callback
-      metadata: {
-        orderId: order._id.toString(),
-        userId: user._id.toString(),
-        orderNumber: order.orderNumber
-      },
-      channels: ['card', 'bank', 'mobile_money'],
-      currency: 'GHS'
-    };
-
-    console.log('Initializing Paystack payment:', paymentData);
-
-    const response = await axios.post(
-      'https://api.paystack.co/transaction/initialize',
-      paymentData,
-      {
-        headers: {
-          Authorization: `Bearer ${paystackSecretKey}`,
-          'Content-Type': 'application/json'
-        }
+  static async initializePaystackPayment(order, user) {
+    try {
+      const paystackSecretKey = process.env.PAYSTACK_SECRET_KEY;
+      
+      if (!paystackSecretKey) {
+        throw new Error('Paystack secret key not configured');
       }
-    );
 
-    if (response.data.status === true) {
-      // Update order with payment reference
-      await Order.findByIdAndUpdate(order._id, {
-        'paymentDetails.reference': response.data.data.reference,
-        'paymentDetails.accessCode': response.data.data.access_code
-      });
-
-      return {
-        authorization_url: response.data.data.authorization_url,
-        access_code: response.data.data.access_code,
-        reference: response.data.data.reference
+      const paymentData = {
+        email: user.email,
+        amount: Math.round(order.totalAmount * 100),
+        reference: `${order.orderNumber}_${Date.now()}`,
+        callback_url: `${process.env.FRONTEND_URL}/checkout`,
+        metadata: {
+          orderId: order._id.toString(),
+          userId: user._id.toString(),
+          orderNumber: order.orderNumber
+        },
+        channels: ['card', 'bank', 'mobile_money'],
+        currency: 'GHS'
       };
-    } else {
-      throw new Error(response.data.message || 'Paystack initialization failed');
-    }
 
-  } catch (error) {
-    console.error('Paystack initialization error:', error.response?.data || error.message);
-    throw error;
+      console.log('Initializing Paystack payment:', paymentData);
+
+      const response = await axios.post(
+        'https://api.paystack.co/transaction/initialize',
+        paymentData,
+        {
+          headers: {
+            Authorization: `Bearer ${paystackSecretKey}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      if (response.data.status === true) {
+        await Order.findByIdAndUpdate(order._id, {
+          'paymentDetails.reference': response.data.data.reference,
+          'paymentDetails.accessCode': response.data.data.access_code
+        });
+
+        return {
+          authorization_url: response.data.data.authorization_url,
+          access_code: response.data.data.access_code,
+          reference: response.data.data.reference
+        };
+      } else {
+        throw new Error(response.data.message || 'Paystack initialization failed');
+      }
+
+    } catch (error) {
+      console.error('Paystack initialization error:', error.response?.data || error.message);
+      throw error;
+    }
   }
-}
 
   // Reserve serial pins for checker products
   static async reserveSerialPins(productId, quantity, orderId) {
@@ -323,7 +315,7 @@ static async initializePaystackPayment(order, user) {
       const serialPins = await SerialPin.find({
         productId,
         isUsed: false,
-        orderId: null
+        status: 'available'
       }).limit(quantity);
 
       if (serialPins.length < quantity) {
@@ -333,7 +325,10 @@ static async initializePaystackPayment(order, user) {
       // Mark pins as reserved for this order
       await SerialPin.updateMany(
         { _id: { $in: serialPins.map(pin => pin._id) } },
-        { orderId: orderId, status: 'reserved' }
+        { 
+          orderId: orderId, 
+          status: 'reserved'
+        }
       );
 
       console.log(`Reserved ${serialPins.length} serial pins for order ${orderId}`);
@@ -344,120 +339,165 @@ static async initializePaystackPayment(order, user) {
     }
   }
 
-  // Verify payment (Paystack webhook or manual verification)
-static async verifyPayment(req, res) {
-  try {
-    const { reference } = req.body;
-    
-    if (!reference) {
-      return res.status(400).json({
-        success: false,
-        message: 'Payment reference is required'
-      });
-    }
-
-    const paystackSecretKey = process.env.PAYSTACK_SECRET_KEY;
-    
-    if (!paystackSecretKey) {
-      return res.status(500).json({
-        success: false,
-        message: 'Payment service not configured'
-      });
-    }
-
-    console.log('Verifying payment with reference:', reference);
-
-    const response = await axios.get(
-      `https://api.paystack.co/transaction/verify/${reference}`,
-      {
-        headers: {
-          Authorization: `Bearer ${paystackSecretKey}`
-        }
-      }
-    );
-
-    if (response.data.status === true && response.data.data.status === 'success') {
-      const paymentData = response.data.data;
-      const orderId = paymentData.metadata.orderId;
-
-      console.log('Payment successful for order:', orderId);
-
-      const order = await Order.findById(orderId);
-
-      if (!order) {
-        return res.status(404).json({
+  // FIXED: Verify payment with better serial pin assignment
+  static async verifyPayment(req, res) {
+    try {
+      const { reference } = req.body;
+      
+      if (!reference) {
+        return res.status(400).json({
           success: false,
-          message: 'Order not found'
+          message: 'Payment reference is required'
         });
       }
 
-      if (order.status === 'paid') {
-        console.log('Order already processed');
-        return res.json({
-          success: true,
-          message: 'Payment already processed',
-          data: { order }
+      const paystackSecretKey = process.env.PAYSTACK_SECRET_KEY;
+      
+      if (!paystackSecretKey) {
+        return res.status(500).json({
+          success: false,
+          message: 'Payment service not configured'
         });
       }
 
-      // Update order status
-      order.status = 'paid';
-      order.paymentDetails.paidAt = new Date();
-      order.paymentDetails.paystackResponse = paymentData;
-      await order.save();
+      console.log('=== PAYMENT VERIFICATION ===');
+      console.log('Verifying payment with reference:', reference);
 
-      console.log('Order status updated to paid');
-
-      // Update serial pins
-      for (const item of order.items) {
-        if (item.productCategory === 'checker') {
-          const updateResult = await SerialPin.updateMany(
-            { 
-              orderId: order._id,
-              status: 'reserved'
-            },
-            { 
-              isUsed: true, 
-              status: 'sold', 
-              usedAt: new Date() 
-            }
-          );
-          
-          console.log(`Updated ${updateResult.modifiedCount} serial pins to sold status`);
+      const response = await axios.get(
+        `https://api.paystack.co/transaction/verify/${reference}`,
+        {
+          headers: {
+            Authorization: `Bearer ${paystackSecretKey}`
+          }
         }
-      }
-
-      // Clear cart
-      await Cart.findOneAndUpdate(
-        { userId: order.userId },
-        { items: [], totalAmount: 0, itemCount: 0 }
       );
 
-      console.log('Cart cleared for user');
+      if (response.data.status === true && response.data.data.status === 'success') {
+        const paymentData = response.data.data;
+        const orderId = paymentData.metadata.orderId;
 
-      res.json({
-        success: true,
-        message: 'Payment verified successfully',
-        data: { order }
-      });
+        console.log('Payment successful for order:', orderId);
 
-    } else {
-      res.status(400).json({
+        const order = await Order.findById(orderId);
+
+        if (!order) {
+          return res.status(404).json({
+            success: false,
+            message: 'Order not found'
+          });
+        }
+
+        if (order.status === 'paid') {
+          console.log('Order already processed');
+          return res.json({
+            success: true,
+            message: 'Payment already processed',
+            data: { order }
+          });
+        }
+
+        // Update order status
+        order.status = 'paid';
+        order.paymentDetails.paidAt = new Date();
+        order.paymentDetails.paystackResponse = paymentData;
+        await order.save();
+
+        console.log('Order status updated to paid');
+
+        // FIXED: Better serial pin assignment logic
+        for (const item of order.items) {
+          if (item.productCategory === 'checker') {
+            console.log(`Processing checker product: ${item.productName}, quantity: ${item.quantity}`);
+            
+            // First, try to update reserved pins for this order
+            const reservedUpdateResult = await SerialPin.updateMany(
+              { 
+                orderId: order._id,
+                status: 'reserved',
+                isUsed: false
+              },
+              { 
+                isUsed: true, 
+                status: 'sold', 
+                usedAt: new Date() 
+              }
+            );
+            
+            console.log(`Updated ${reservedUpdateResult.modifiedCount} reserved pins to sold`);
+
+            // If no reserved pins were found, assign new ones
+            if (reservedUpdateResult.modifiedCount === 0) {
+              console.log('No reserved pins found, assigning new ones...');
+              
+              const availablePins = await SerialPin.find({
+                productId: item.productId,
+                isUsed: false,
+                status: 'available'
+              }).limit(item.quantity);
+
+              if (availablePins.length < item.quantity) {
+                console.error(`Not enough pins available for ${item.productName}`);
+                continue;
+              }
+
+              const pinIds = availablePins.map(pin => pin._id);
+              const assignResult = await SerialPin.updateMany(
+                { _id: { $in: pinIds } },
+                {
+                  orderId: order._id,
+                  isUsed: true,
+                  status: 'sold',
+                  usedAt: new Date()
+                }
+              );
+
+              console.log(`Assigned ${assignResult.modifiedCount} new pins to order`);
+            }
+          }
+        }
+
+        // Verify serial pins were assigned
+        const assignedPins = await SerialPin.countDocuments({
+          orderId: order._id,
+          status: 'sold'
+        });
+
+        console.log(`Total pins assigned to order: ${assignedPins}`);
+
+        // Clear cart
+        await Cart.findOneAndUpdate(
+          { userId: order.userId },
+          { items: [], totalAmount: 0, itemCount: 0 }
+        );
+
+        console.log('Cart cleared for user');
+
+        res.json({
+          success: true,
+          message: 'Payment verified successfully',
+          data: { 
+            order,
+            serialPinsAssigned: assignedPins
+          }
+        });
+
+      } else {
+        res.status(400).json({
+          success: false,
+          message: 'Payment verification failed',
+          data: response.data
+        });
+      }
+
+    } catch (error) {
+      console.error('Payment verification error:', error);
+      res.status(500).json({
         success: false,
         message: 'Payment verification failed',
-        data: response.data
+        error: error.message
       });
     }
-
-  } catch (error) {
-    console.error('Payment verification error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Payment verification failed',
-      error: error.message
-    });
   }
-}
 
   // Cancel order (only if pending)
   static async cancelOrder(req, res) {
@@ -480,8 +520,12 @@ static async verifyPayment(req, res) {
 
       // Release reserved serial pins
       await SerialPin.updateMany(
-        { orderId: order._id },
-        { $unset: { orderId: 1 }, status: 'available' }
+        { orderId: order._id, status: 'reserved' },
+        { 
+          $unset: { orderId: 1 }, 
+          status: 'available',
+          isUsed: false
+        }
       );
 
       // Update order status
