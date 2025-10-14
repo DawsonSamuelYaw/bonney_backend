@@ -23,7 +23,47 @@ const validateRequest = (req, res, next) => {
 
 // ==================== ADMIN ROUTES (MUST BE FIRST) ====================
 
-// Get all orders (Admin)
+// Get all orders (Admin) - Primary endpoint
+router.get('/admin/orders', [authMiddleware, adminMiddleware], async (req, res) => {
+  try {
+    const { status, page = 1, limit = 20 } = req.query;
+    
+    const filter = {};
+    if (status && status !== 'all') {
+      filter.status = status;
+    }
+
+    const orders = await Order.find(filter)
+      .populate('userId', 'name email')
+      .populate('items.productId', 'name category')
+      .sort({ createdAt: -1 })
+      .limit(parseInt(limit))
+      .skip((parseInt(page) - 1) * parseInt(limit));
+
+    const total = await Order.countDocuments(filter);
+
+    res.json({
+      success: true,
+      data: {
+        orders,
+        pagination: {
+          total,
+          page: parseInt(page),
+          pages: Math.ceil(total / parseInt(limit))
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Get admin orders error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch orders',
+      error: error.message
+    });
+  }
+});
+
+// Get all orders (Admin) - Legacy endpoint for backward compatibility
 router.get('/admin/all', [authMiddleware, adminMiddleware], async (req, res) => {
   try {
     const { status, page = 1, limit = 20 } = req.query;
@@ -262,17 +302,110 @@ router.get('/admin/serial-pins', [authMiddleware, adminMiddleware], async (req, 
     });
   }
 });
+// Update order status (Admin) - Legacy endpoint for backward compatibility
+router.patch('/admin/orders/:id/status', [authMiddleware, adminMiddleware], async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, notes } = req.body;
 
+    console.log('=== UPDATE ORDER STATUS (LEGACY) ===');
+    console.log('Order ID:', id);
+    console.log('New Status:', status);
+    console.log('Notes:', notes);
+
+    // Validate status
+    const validStatuses = ['pending', 'processing', 'paid', 'cancelled', 'completed', 'failed'];
+    if (status && !validStatuses.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid status. Must be one of: ${validStatuses.join(', ')}`
+      });
+    }
+
+    const order = await Order.findById(id);
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Order not found'
+      });
+    }
+
+    // Update order
+    if (status) order.status = status;
+    if (notes) order.adminNotes = notes;
+    order.updatedAt = new Date();
+
+    await order.save();
+
+    // If status is changed to 'paid', auto-assign serial pins
+    if (status === 'paid' && order.items.length > 0) {
+      console.log('Order marked as paid, checking for serial pin assignment...');
+      
+      for (const item of order.items) {
+        // Only assign serial pins for checker products
+        if (item.productCategory === 'checker') {
+          const quantity = item.quantity;
+          
+          console.log(`Assigning ${quantity} serial pins for product ${item.productId}`);
+          
+          // Find available serial pins
+          const availablePins = await SerialPin.find({
+            productId: item.productId,
+            isUsed: false,
+            status: 'available'
+          }).limit(quantity);
+
+          if (availablePins.length < quantity) {
+            console.warn(`Not enough serial pins for product ${item.productId}. Need ${quantity}, found ${availablePins.length}`);
+            continue;
+          }
+
+          // Assign serial pins to order
+          for (const pin of availablePins) {
+            pin.orderId = order._id;
+            pin.isUsed = true;
+            pin.status = 'sold';
+            pin.usedAt = new Date();
+            await pin.save();
+          }
+
+          console.log(`Successfully assigned ${availablePins.length} serial pins`);
+        }
+      }
+    }
+
+    // Populate order details for response
+    await order.populate('userId', 'name email');
+    await order.populate('items.productId', 'name category');
+
+    res.json({
+      success: true,
+      message: 'Order updated successfully',
+      data: { order }
+    });
+
+  } catch (error) {
+    console.error('Update order status error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update order',
+      error: error.message
+    });
+  }
+});
 // Bulk add serial pins (Admin)
 router.post('/admin/serial-pins/bulk', [authMiddleware, adminMiddleware], async (req, res) => {
   try {
-    const { productId, pins } = req.body;
+    const { productId, pins, serialPins } = req.body;
+    
+    // Support both 'pins' and 'serialPins' for backward compatibility
+    const pinsArray = serialPins || pins;
 
     console.log('=== BULK ADD SERIAL PINS ===');
     console.log('Product ID:', productId);
-    console.log('Number of pins:', pins?.length);
+    console.log('Number of pins:', pinsArray?.length);
 
-    if (!productId || !Array.isArray(pins) || pins.length === 0) {
+    if (!productId || !Array.isArray(pinsArray) || pinsArray.length === 0) {
       return res.status(400).json({
         success: false,
         message: 'Product ID and pins array are required'
@@ -294,13 +427,13 @@ router.post('/admin/serial-pins/bulk', [authMiddleware, adminMiddleware], async 
       errors: []
     };
 
-    for (const pinData of pins) {
+    for (const pinData of pinsArray) {
       try {
-        const { serialNumber, pin, expiresAt } = pinData;
+        const { serialNumber, pin, expiresAt, productId: itemProductId } = pinData;
 
-        if (!serialNumber || !pin) {
+        if (!serialNumber) {
           results.skipped++;
-          results.errors.push({ serialNumber, error: 'Missing serial number or PIN' });
+          results.errors.push({ serialNumber: 'N/A', error: 'Missing serial number' });
           continue;
         }
 
@@ -312,11 +445,11 @@ router.post('/admin/serial-pins/bulk', [authMiddleware, adminMiddleware], async 
           continue;
         }
 
-        // Create serial pin
+        // Create serial pin - use itemProductId if provided, otherwise use main productId
         await SerialPin.create({
-          productId,
+          productId: itemProductId || productId,
           serialNumber,
-          pin,
+          pin: pin || '',
           expiresAt: expiresAt || null,
           isUsed: false,
           status: 'available'
