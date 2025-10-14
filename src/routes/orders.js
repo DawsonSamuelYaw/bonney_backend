@@ -535,6 +535,7 @@ router.delete('/admin/serial-pins/:id', [authMiddleware, adminMiddleware], async
 router.get('/', authMiddleware, OrderController.getUserOrders);
 
 // Get user's purchased items - MUST BE BEFORE /:id route
+// Get user's purchased items
 router.get('/purchases', authMiddleware, async (req, res) => {
   try {
     const userId = req.user.id;
@@ -546,23 +547,22 @@ router.get('/purchases', authMiddleware, async (req, res) => {
     const paidOrders = await Order.find({
       userId: userId,
       status: 'paid'
-    }).populate('items.productId', 'name category').sort({ createdAt: -1 });
+    })
+    .populate('items.productId', 'name category description price')
+    .sort({ createdAt: -1 });
 
     console.log('Found paid orders:', paidOrders.length);
 
-    // Get all serial pins for these orders
-    const orderIds = paidOrders.map(order => order._id);
-    const purchasedSerialPins = await SerialPin.find({
-      orderId: { $in: orderIds }
-    }).populate('productId', 'name category description').populate('orderId', 'orderNumber createdAt');
+    // Build response with serial pins
+    const purchases = [];
 
-    console.log('Found serial pins:', purchasedSerialPins.length);
+    for (const order of paidOrders) {
+      // Get serial pins for this order
+      const serialPins = await SerialPin.find({
+        orderId: order._id
+      }).populate('productId', 'name category description');
 
-    // Build response
-    const purchasesByOrder = {};
-    
-    paidOrders.forEach(order => {
-      purchasesByOrder[order._id.toString()] = {
+      const purchaseData = {
         order: {
           id: order._id,
           orderNumber: order.orderNumber,
@@ -572,41 +572,34 @@ router.get('/purchases', authMiddleware, async (req, res) => {
           paymentMethod: order.paymentMethod
         },
         items: order.items.map(item => ({
-          productName: item.productName,
-          productCategory: item.productCategory,
+          productName: item.productId?.name || item.productName,
+          productCategory: item.productId?.category || item.productCategory,
+          productDescription: item.productId?.description,
           quantity: item.quantity,
           price: item.price,
           total: item.total
         })),
-        serialPins: []
-      };
-    });
-
-    // Add serial pins to their orders
-    purchasedSerialPins.forEach(pin => {
-      const orderKey = pin.orderId._id.toString();
-      if (purchasesByOrder[orderKey]) {
-        purchasesByOrder[orderKey].serialPins.push({
+        serialPins: serialPins.map(pin => ({
           id: pin._id,
           serialNumber: pin.serialNumber,
           pin: pin.pin,
-          productName: pin.productId.name,
-          productCategory: pin.productId.category,
-          productDescription: pin.productId.description,
-          purchaseDate: pin.usedAt || pin.orderId.createdAt,
+          productName: pin.productId?.name,
+          productCategory: pin.productId?.category,
+          productDescription: pin.productId?.description,
+          purchaseDate: pin.usedAt || order.createdAt,
           expiresAt: pin.expiresAt
-        });
-      }
-    });
+        }))
+      };
 
-    const purchases = Object.values(purchasesByOrder);
+      purchases.push(purchaseData);
+    }
 
     res.json({
       success: true,
       data: {
         purchases,
         totalPurchases: purchases.length,
-        totalSerialPins: purchasedSerialPins.length
+        totalSerialPins: purchases.reduce((total, purchase) => total + purchase.serialPins.length, 0)
       }
     });
 
