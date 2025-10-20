@@ -386,6 +386,7 @@ class OrderController {
         // CRITICAL FIX: Assign serial pins with proper ObjectId conversion
         let totalAssignedPins = 0;
         const assignedPins = [];
+        const assignmentErrors = [];
         
         for (const item of order.items) {
           if (item.productCategory === 'checker') {
@@ -429,13 +430,25 @@ class OrderController {
             console.log(`Found ${availablePins.length} available pins to assign`);
 
             if (availablePins.length < quantity) {
-              console.error(`❌ NOT ENOUGH PINS! Need ${quantity}, found ${availablePins.length}`);
-              continue;
+              const errorMsg = `Insufficient pins for ${item.productName}: need ${quantity}, found ${availablePins.length}`;
+              console.error(`❌ ${errorMsg}`);
+              assignmentErrors.push({
+                productName: item.productName,
+                quantityNeeded: quantity,
+                quantityAvailable: availablePins.length
+              });
+              
+              // Assign whatever is available
+              if (availablePins.length > 0) {
+                console.log(`⚠️ Assigning partial quantity: ${availablePins.length} pins`);
+              } else {
+                continue; // Skip if no pins available
+              }
             }
 
-            // Assign pins to order
+            // Assign pins to order (all available or requested quantity)
             const pinIds = availablePins.map(pin => pin._id);
-            console.log(`Assigning pin IDs: ${pinIds.join(', ')}`);
+            console.log(`Assigning ${pinIds.length} pin IDs: ${pinIds.join(', ')}`);
             
             const updateResult = await SerialPin.updateMany(
               { _id: { $in: pinIds } },
@@ -455,6 +468,13 @@ class OrderController {
               .populate('productId', 'name category description');
             assignedPins.push(...updatedPins);
           }
+        }
+        
+        console.log(`\n=== ASSIGNMENT SUMMARY ===`);
+        console.log(`Total items in order: ${order.items.length}`);
+        console.log(`Total pins assigned: ${totalAssignedPins}`);
+        if (assignmentErrors.length > 0) {
+          console.log(`⚠️ Assignment errors:`, assignmentErrors);
         }
 
         console.log(`\n=== ASSIGNMENT COMPLETE ===`);
