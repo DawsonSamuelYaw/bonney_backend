@@ -5,6 +5,7 @@ const Cart = require('../models/cart');
 const Product = require('../models/Product');
 const SerialPin = require('../models/SerialPin');
 const axios = require('axios');
+const mongoose = require('mongoose');
 
 class OrderController {
   // Get user orders
@@ -136,8 +137,9 @@ class OrderController {
             availableStock = await SerialPin.countDocuments({
               productId: product._id,
               isUsed: false,
-              status: 'available' // Only count truly available pins
+              status: 'available'
             });
+            console.log(`Checker product ${product.name}: ${availableStock} pins available`);
           } else {
             availableStock = product.stockQuantity || 0;
           }
@@ -211,13 +213,6 @@ class OrderController {
           paymentResponse = await OrderController.initializePaystackPayment(order, user);
         } catch (payError) {
           console.error('Paystack initialization error:', payError);
-        }
-      }
-
-      // Reserve stock for checker items (mark serial pins as reserved)
-      for (const item of validatedItems) {
-        if (item.productCategory === 'checker') {
-          await OrderController.reserveSerialPins(item.productId, item.quantity, order._id);
         }
       }
 
@@ -309,198 +304,208 @@ class OrderController {
     }
   }
 
-  // Reserve serial pins for checker products
-  static async reserveSerialPins(productId, quantity, orderId) {
+  // CRITICAL FIX: Verify payment with proper ObjectId handling
+  static async verifyPayment(req, res) {
     try {
-      const serialPins = await SerialPin.find({
-        productId,
-        isUsed: false,
-        status: 'available'
-      }).limit(quantity);
-
-      if (serialPins.length < quantity) {
-        throw new Error(`Insufficient serial pins available for product ${productId}`);
+      const { reference } = req.body;
+      
+      if (!reference) {
+        return res.status(400).json({
+          success: false,
+          message: 'Payment reference is required'
+        });
       }
 
-      // Mark pins as reserved for this order
-      await SerialPin.updateMany(
-        { _id: { $in: serialPins.map(pin => pin._id) } },
-        { 
-          orderId: orderId, 
-          status: 'reserved'
+      const paystackSecretKey = process.env.PAYSTACK_SECRET_KEY;
+      
+      if (!paystackSecretKey) {
+        return res.status(500).json({
+          success: false,
+          message: 'Payment service not configured'
+        });
+      }
+
+      console.log('=== PAYMENT VERIFICATION ===');
+      console.log('Verifying payment with reference:', reference);
+
+      const response = await axios.get(
+        `https://api.paystack.co/transaction/verify/${reference}`,
+        {
+          headers: {
+            Authorization: `Bearer ${paystackSecretKey}`
+          }
         }
       );
 
-      console.log(`Reserved ${serialPins.length} serial pins for order ${orderId}`);
-      
-    } catch (error) {
-      console.error('Error reserving serial pins:', error);
-      throw error;
-    }
-  }
+      if (response.data.status === true && response.data.data.status === 'success') {
+        const paymentData = response.data.data;
+        const orderId = paymentData.metadata?.orderId;
 
-  // FIXED: Verify payment with better serial pin assignment
-// FIXED: Verify payment with improved serial pin assignment
-static async verifyPayment(req, res) {
-  try {
-    const { reference } = req.body;
-    
-    if (!reference) {
-      return res.status(400).json({
-        success: false,
-        message: 'Payment reference is required'
-      });
-    }
+        console.log('Payment successful for order:', orderId);
 
-    const paystackSecretKey = process.env.PAYSTACK_SECRET_KEY;
-    
-    if (!paystackSecretKey) {
-      return res.status(500).json({
-        success: false,
-        message: 'Payment service not configured'
-      });
-    }
-
-    console.log('=== PAYMENT VERIFICATION ===');
-    console.log('Verifying payment with reference:', reference);
-
-    const response = await axios.get(
-      `https://api.paystack.co/transaction/verify/${reference}`,
-      {
-        headers: {
-          Authorization: `Bearer ${paystackSecretKey}`
+        if (!orderId) {
+          return res.status(400).json({
+            success: false,
+            message: 'Order ID not found in payment metadata'
+          });
         }
-      }
-    );
 
-    if (response.data.status === true && response.data.data.status === 'success') {
-      const paymentData = response.data.data;
-      const orderId = paymentData.metadata?.orderId;
+        const order = await Order.findById(orderId);
 
-      console.log('Payment successful for order:', orderId);
+        if (!order) {
+          return res.status(404).json({
+            success: false,
+            message: 'Order not found'
+          });
+        }
 
-      if (!orderId) {
-        return res.status(400).json({
-          success: false,
-          message: 'Order ID not found in payment metadata'
-        });
-      }
+        if (order.status === 'paid') {
+          console.log('Order already processed');
+          await order.populate('items.productId');
+          const serialPins = await SerialPin.find({ orderId: order._id })
+            .populate('productId', 'name category description');
+          
+          return res.json({
+            success: true,
+            message: 'Payment already processed',
+            data: { 
+              order,
+              serialPins 
+            }
+          });
+        }
 
-      const order = await Order.findById(orderId);
+        // Update order status FIRST
+        order.status = 'paid';
+        order.paymentDetails.paidAt = new Date();
+        order.paymentDetails.paystackResponse = paymentData;
+        await order.save();
 
-      if (!order) {
-        return res.status(404).json({
-          success: false,
-          message: 'Order not found'
-        });
-      }
+        console.log('Order status updated to paid');
 
-      if (order.status === 'paid') {
-        console.log('Order already processed');
-        // Still return the order with populated serial pins
+        // CRITICAL FIX: Assign serial pins with proper ObjectId conversion
+        let totalAssignedPins = 0;
+        const assignedPins = [];
+        
+        for (const item of order.items) {
+          if (item.productCategory === 'checker') {
+            console.log(`\n--- Processing checker product ---`);
+            console.log(`Product Name: ${item.productName}`);
+            console.log(`Product ID (from order): ${item.productId}`);
+            console.log(`Product ID type: ${typeof item.productId}`);
+            console.log(`Quantity needed: ${item.quantity}`);
+            
+            const quantity = item.quantity;
+            
+            // CRITICAL FIX: Convert to ObjectId if it's a string
+            let productObjectId;
+            if (typeof item.productId === 'string') {
+              productObjectId = new mongoose.Types.ObjectId(item.productId);
+              console.log(`Converted string to ObjectId: ${productObjectId}`);
+            } else {
+              productObjectId = item.productId;
+            }
+
+            // Debug: Check what pins exist for this product
+            const allPinsForProduct = await SerialPin.find({ 
+              productId: productObjectId 
+            });
+            console.log(`Total pins in DB for this product: ${allPinsForProduct.length}`);
+            
+            const availablePinsForProduct = await SerialPin.find({ 
+              productId: productObjectId,
+              isUsed: false,
+              status: 'available'
+            });
+            console.log(`Available pins for this product: ${availablePinsForProduct.length}`);
+
+            // Find available serial pins
+            const availablePins = await SerialPin.find({
+              productId: productObjectId,
+              isUsed: false,
+              status: 'available'
+            }).limit(quantity);
+
+            console.log(`Found ${availablePins.length} available pins to assign`);
+
+            if (availablePins.length < quantity) {
+              console.error(`❌ NOT ENOUGH PINS! Need ${quantity}, found ${availablePins.length}`);
+              continue;
+            }
+
+            // Assign pins to order
+            const pinIds = availablePins.map(pin => pin._id);
+            console.log(`Assigning pin IDs: ${pinIds.join(', ')}`);
+            
+            const updateResult = await SerialPin.updateMany(
+              { _id: { $in: pinIds } },
+              {
+                orderId: order._id,
+                isUsed: true,
+                status: 'sold',
+                usedAt: new Date()
+              }
+            );
+
+            console.log(`✅ Update result: ${updateResult.modifiedCount} pins modified`);
+            totalAssignedPins += updateResult.modifiedCount;
+            
+            // Get the updated pins for response
+            const updatedPins = await SerialPin.find({ _id: { $in: pinIds } })
+              .populate('productId', 'name category description');
+            assignedPins.push(...updatedPins);
+          }
+        }
+
+        console.log(`\n=== ASSIGNMENT COMPLETE ===`);
+        console.log(`Total pins assigned: ${totalAssignedPins}`);
+
+        // Clear user's cart
+        await Cart.findOneAndUpdate(
+          { userId: order.userId },
+          { items: [], totalAmount: 0, itemCount: 0 }
+        );
+
+        console.log('Cart cleared for user:', order.userId);
+
+        // Populate order for response
         await order.populate('items.productId');
         const serialPins = await SerialPin.find({ orderId: order._id })
           .populate('productId', 'name category description');
-        
-        return res.json({
+
+        console.log(`Final check - Serial pins found for order: ${serialPins.length}`);
+
+        res.json({
           success: true,
-          message: 'Payment already processed',
+          message: 'Payment verified successfully',
           data: { 
             order,
-            serialPins 
+            serialPins,
+            totalAssignedPins,
+            debug: {
+              orderItems: order.items.length,
+              pinsAssigned: serialPins.length
+            }
           }
+        });
+
+      } else {
+        res.status(400).json({
+          success: false,
+          message: 'Payment verification failed',
+          data: response.data
         });
       }
 
-      // Update order status
-      order.status = 'paid';
-      order.paymentDetails.paidAt = new Date();
-      order.paymentDetails.paystackResponse = paymentData;
-      await order.save();
-
-      console.log('Order status updated to paid');
-
-      // IMPROVED: Assign serial pins to order
-      let totalAssignedPins = 0;
-      
-      for (const item of order.items) {
-        if (item.productCategory === 'checker') {
-          console.log(`Processing checker product: ${item.productName}, quantity: ${item.quantity}`);
-          
-          const quantity = item.quantity;
-          const productId = item.productId;
-
-          // Find available serial pins for this product
-          const availablePins = await SerialPin.find({
-            productId: productId,
-            isUsed: false,
-            status: 'available'
-          }).limit(quantity);
-
-          console.log(`Found ${availablePins.length} available pins for product ${productId}`);
-
-          if (availablePins.length < quantity) {
-            console.warn(`Not enough pins available for ${item.productName}. Need ${quantity}, found ${availablePins.length}`);
-            continue;
-          }
-
-          // Assign pins to order
-          const pinIds = availablePins.map(pin => pin._id);
-          const updateResult = await SerialPin.updateMany(
-            { _id: { $in: pinIds } },
-            {
-              orderId: order._id,
-              isUsed: true,
-              status: 'sold',
-              usedAt: new Date()
-            }
-          );
-
-          console.log(`Assigned ${updateResult.modifiedCount} pins to order ${order._id}`);
-          totalAssignedPins += updateResult.modifiedCount;
-        }
-      }
-
-      // Clear user's cart
-      await Cart.findOneAndUpdate(
-        { userId: order.userId },
-        { items: [], totalAmount: 0, itemCount: 0 }
-      );
-
-      console.log('Cart cleared for user:', order.userId);
-
-      // Populate order for response
-      await order.populate('items.productId');
-      const serialPins = await SerialPin.find({ orderId: order._id })
-        .populate('productId', 'name category description');
-
-      res.json({
-        success: true,
-        message: 'Payment verified successfully',
-        data: { 
-          order,
-          serialPins,
-          totalAssignedPins
-        }
-      });
-
-    } else {
-      res.status(400).json({
+    } catch (error) {
+      console.error('Payment verification error:', error);
+      res.status(500).json({
         success: false,
         message: 'Payment verification failed',
-        data: response.data
+        error: error.message
       });
     }
-
-  } catch (error) {
-    console.error('Payment verification error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Payment verification failed',
-      error: error.message
-    });
   }
-}
 
   // Cancel order (only if pending)
   static async cancelOrder(req, res) {
@@ -521,13 +526,14 @@ static async verifyPayment(req, res) {
         });
       }
 
-      // Release reserved serial pins
+      // Release any assigned serial pins
       await SerialPin.updateMany(
-        { orderId: order._id, status: 'reserved' },
+        { orderId: order._id },
         { 
           $unset: { orderId: 1 }, 
           status: 'available',
-          isUsed: false
+          isUsed: false,
+          $unset: { usedAt: 1 }
         }
       );
 
